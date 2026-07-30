@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="608" height="84" viewBox="0 0 607.60 84.00" role="img" aria-label="Claude Code statusline">
+<rect width="607.60" height="84.00" rx="6" fill="#1d1f21"/>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,&quot;DejaVu Sans Mono&quot;,monospace" font-size="14" xml:space="preserve">
+<text y="26.40" fill="#c5c8c6">
+<tspan x="14.00" fill="#e5c07b">Opus 5 (1M)</tspan>
+<tspan x="106.40"> </tspan>
+<tspan x="114.80" opacity="0.55">·</tspan>
+<tspan x="123.20"> </tspan>
+<tspan x="131.60" fill="#eb5757">xhigh</tspan>
+<tspan x="173.60"> </tspan>
+<tspan x="182.00" opacity="0.55">│</tspan>
+<tspan x="190.40"> </tspan>
+<tspan x="198.80" opacity="0.55">⎇</tspan>
+<tspan x="207.20"> </tspan>
+<tspan x="215.60" fill="#c678dd">main</tspan>
+<tspan x="249.20"> </tspan>
+<tspan x="257.60" fill="#50c878">+7</tspan>
+<tspan x="274.40"> </tspan>
+<tspan x="282.80" fill="#e6c800">~3</tspan>
+<tspan x="299.60"> </tspan>
+<tspan x="308.00" opacity="0.55">│</tspan>
+<tspan x="316.40"> </tspan>
+<tspan x="324.80" opacity="0.55">ctx</tspan>
+<tspan x="350.00"> </tspan>
+<tspan x="358.40" fill="#56b6c2">███▍</tspan>
+<tspan x="392.00" fill="#56b6c2" opacity="0.55">░░░░░░ </tspan>
+<tspan x="450.80" fill="#56b6c2" opacity="0.55">34%</tspan>
+</text>
+<text y="46.40" fill="#c5c8c6">
+<tspan x="14.00" opacity="0.55">5h</tspan>
+<tspan x="30.80"> </tspan>
+<tspan x="39.20" fill="#ffb055">███████▌</tspan>
+<tspan x="106.40" fill="#ffb055" opacity="0.55">░░ </tspan>
+<tspan x="131.60" fill="#ffb055" opacity="0.55">75%</tspan>
+<tspan x="156.80"> </tspan>
+<tspan x="165.20" fill="#eb5757">↑</tspan>
+<tspan x="173.60" fill="#ffb055">57m</tspan>
+<tspan x="198.80"> </tspan>
+<tspan x="207.20" opacity="0.55">↻2h10m</tspan>
+<tspan x="257.60"> </tspan>
+<tspan x="266.00" opacity="0.55">│</tspan>
+<tspan x="274.40"> </tspan>
+<tspan x="282.80" opacity="0.55">7d</tspan>
+<tspan x="299.60"> </tspan>
+<tspan x="308.00" fill="#ffb055">█████▌</tspan>
+<tspan x="358.40" fill="#ffb055" opacity="0.55">░░░░ </tspan>
+<tspan x="400.40" fill="#ffb055" opacity="0.55">55%</tspan>
+<tspan x="425.60"> </tspan>
+<tspan x="434.00" fill="#e6c800">→</tspan>
+<tspan x="442.40"> </tspan>
+<tspan x="450.80" opacity="0.55">↻Sat</tspan>
+</text>
+<text y="66.40" fill="#c5c8c6">
+<tspan x="14.00" fill="#50c878">$12.14</tspan>
+<tspan x="64.40"> </tspan>
+<tspan x="72.80" opacity="0.55">│</tspan>
+<tspan x="81.20"> </tspan>
+<tspan x="89.60" opacity="0.55">cache</tspan>
+<tspan x="131.60"> </tspan>
+<tspan x="140.00" fill="#50c878">99%</tspan>
+<tspan x="165.20"> </tspan>
+<tspan x="173.60" opacity="0.55">│</tspan>
+<tspan x="182.00"> </tspan>
+<tspan x="190.40" opacity="0.55">~/…/claude-statusline</tspan>
+<tspan x="366.80"> </tspan>
+<tspan x="375.20" opacity="0.55">│</tspan>
+<tspan x="383.60"> </tspan>
+<tspan x="392.00" opacity="0.55">Refactor the auth module</tspan>
+</text>
+</g>
+</svg>
