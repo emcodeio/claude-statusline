@@ -2,6 +2,7 @@
 # Claude Code status line — three rows:
 #   1  model · effort │ ⎇ git │ agent │ ctx gauge
 #   2  5h gauge + pace projection │ 7d gauge + daily-allowance projection
+#      │ per-model weekly gauge(s), via a background-refreshed OAuth cache
 #   3  cost (+ API-overflow ledger) │ cache │ last seen │ cwd │ session name
 #
 # settings.json invokes this via `sh`, so it is written to POSIX shell:
@@ -323,6 +324,151 @@ case "$model" in
     *" context")  model="${model%" context"}" ;;
 esac
 
+# ===== Model-specific weekly window (OAuth usage API) =====
+# The payload carries only the two shared windows; per-model weekly caps (the
+# "Fable" row on the claude.ai usage page) exist only behind the OAuth usage
+# endpoint. Renders happen every few seconds, so the network never sits on the
+# render path: when the stamp outlives its TTL the render advances it and hands
+# the fetch to a detached job, then draws from whatever the cache already
+# holds. The stamp moves even when the fetch fails, so a dead endpoint or a
+# denied keychain costs one attempt per TTL, not one per render. Inert under
+# CLAUDE_SL_NOW (previews must not hit the network against a synthetic clock)
+# and under CLAUDE_SL_NO_OAUTH=1 (kill switch). Costs ~3 extra spawns a render.
+oauth_cache="$usage_dir/.oauth_usage.json"
+oauth_stamp="$usage_dir/.oauth_usage.ts"
+
+# mtime, validated — same BSD-then-GNU probe the transcript segment uses.
+mtime_of() {
+    _mt=$(stat -f %m "$1" 2>/dev/null)
+    case "$_mt" in ''|*[!0-9]*) _mt=$(stat -c %Y "$1" 2>/dev/null) ;; esac
+    case "$_mt" in ''|*[!0-9]*) _mt='' ;; esac
+    printf '%s' "$_mt"
+}
+
+mw=''
+if [ -z "${CLAUDE_SL_NO_OAUTH:-}" ]; then
+    if [ -z "${CLAUDE_SL_NOW:-}" ]; then
+        # 5-minute TTL: the endpoint 429s eagerly (anthropics/claude-code
+        # #31021), and weekly windows move too slowly to justify pushing it.
+        _st=$(mtime_of "$oauth_stamp")
+        if [ -z "$_st" ] || [ $((now - _st)) -ge 300 ]; then
+            mkdir -p "$usage_dir"
+            : > "$oauth_stamp"
+            # Detached, every fd closed: Claude Code reads our stdout to EOF,
+            # so an inherited pipe would stall the redraw for the whole fetch.
+            (
+                # Token sources in order: credentials file (silent), keychain
+                # by account name, then any keychain item (may pop a one-time
+                # consent dialog — "Always Allow" ends them). The -a lookup
+                # comes first because the service name alone is ambiguous:
+                # old Claude Code versions leave a fossil item on the same
+                # service (acct "Claude Code"), and the bare -s lookup returns
+                # that one, shadowing the live item keyed by the login name.
+                # Every source passes the same expiry gate — the endpoint
+                # rate-limits eagerly, so a request that a local timestamp
+                # already condemns is a request we cannot afford to burn.
+                _cred="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json"
+                # expiresAt is an epoch in ms (tolerate seconds).
+                _live='.claudeAiOauth
+                    | select(((.expiresAt // 0)
+                              | if . > 1e12 then . / 1000 else . end) > $n + 60)
+                    | .accessToken // empty'
+                for _src in file keychain-user keychain-any; do
+                    case "$_src" in
+                        file)
+                            [ -f "$_cred" ] || continue
+                            tok=$(jq -r --argjson n "$now" "$_live" "$_cred" 2>/dev/null)
+                            ;;
+                        keychain-user)
+                            tok=$(security find-generic-password -s 'Claude Code-credentials' \
+                                    -a "${USER:-$LOGNAME}" -w 2>/dev/null \
+                                | jq -r --argjson n "$now" "$_live" 2>/dev/null)
+                            ;;
+                        keychain-any)
+                            tok=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null \
+                                | jq -r --argjson n "$now" "$_live" 2>/dev/null)
+                            ;;
+                    esac
+                    [ -z "$tok" ] && continue
+                    _resp=$(curl -sS --max-time 8 https://api.anthropic.com/api/oauth/usage \
+                        -H "Authorization: Bearer $tok" \
+                        -H 'anthropic-beta: oauth-2025-04-20' 2>/dev/null)
+                    [ -z "$_resp" ] && continue
+                    # .raw always lands (debuggability); the cache only accepts
+                    # a body that looks like usage data, so an error envelope
+                    # cannot clobber the last good figures.
+                    printf '%s' "$_resp" > "$oauth_cache.raw"
+                    printf '%s' "$_resp" | jq -e 'has("five_hour") or has("seven_day")' >/dev/null 2>&1 \
+                        && { printf '%s' "$_resp" > "$oauth_cache"; break; }
+                done
+            ) </dev/null >/dev/null 2>&1 &
+        fi
+    fi
+    if [ -f "$oauth_cache" ]; then
+        _cmt=$(mtime_of "$oauth_cache")
+        # An hour-old figure is a lie with a gauge on it — hide, don't guess.
+        # Under the test clock mtimes are meaningless; previews trust the file.
+        if [ -n "${CLAUDE_SL_NOW:-}" ] || { [ -n "$_cmt" ] && [ $((now - _cmt)) -lt 3600 ]; }; then
+            # "label|pct|reset" per window — pipes, not tabs: consecutive tabs
+            # collapse under IFS splitting, pipes keep empty fields addressable.
+            # The canonical source is the limits[] array: model-scoped weekly
+            # caps arrive as kind "weekly_scoped" with the model under .scope
+            # (the top-level seven_day_<model> keys are null fossils on current
+            # accounts). The key scan stays as a fallback for older shapes.
+            mw=$(jq -r '
+                def ep:
+                    if type == "number" then floor
+                    elif type == "string" then
+                        (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | (try fromdateiso8601 catch ""))
+                    else "" end;
+                def cap: (.[0:1] | ascii_upcase) + .[1:];
+                [ (.limits // [])[]
+                  | select(.kind == "weekly_scoped" and .percent != null)
+                  | ((.scope.model.display_name // .scope.surface // "scoped") | tostring | cap) + "|"
+                      + (.percent | tostring) + "|"
+                      + ((.resets_at | ep) | tostring)
+                ] as $scoped
+                | if ($scoped | length) > 0 then $scoped[]
+                  else
+                    to_entries[]
+                    | select((.key | test("^seven_day_(opus|sonnet|haiku|fable|mythos)")) and ((.value | type) == "object"))
+                    | (.key | sub("^seven_day_"; "")) as $m
+                    | ($m | cap) + "|"
+                        + ((.value.utilization // .value.used_percentage // "") | tostring) + "|"
+                        + ((.value.resets_at | ep) | tostring)
+                  end
+            ' "$oauth_cache" 2>/dev/null)
+        fi
+    fi
+fi
+
+mw_gate=0
+mw_segs=''
+if [ -n "$mw" ]; then
+    while IFS='|' read -r _lbl _pct _rst; do
+        case "$_pct" in ''|*[!0-9.]*) continue ;; esac
+        case "$_lbl" in
+            Opus*)   _mcol=$c_opus ;;
+            Haiku*)  _mcol=$c_haiku ;;
+            Sonnet*) _mcol=$c_sonnet ;;
+            *)       _mcol=$c_fable ;;
+        esac
+        _s="${_mcol}${_lbl}${rst} $(mkbar "$_pct")"
+        _s="$_s$(pace_7d "$_pct" "$_rst")"
+        [ -n "$_rst" ] && [ "$_rst" -gt "$now" ] 2>/dev/null && \
+            _s="$_s ${dim}↻$(fmt_day "$_rst")${rst}"
+        if [ -z "$mw_segs" ]; then mw_segs=$_s; else mw_segs="$mw_segs
+$_s"; fi
+        # A model window only opens the billing gate when it caps the model
+        # actually in use — Opus at 100% does not gate a Sonnet session.
+        case "$model" in
+            *"$_lbl"*) [ "$(awk -v p="$_pct" 'BEGIN { print (p >= 100) }')" = 1 ] && mw_gate=1 ;;
+        esac
+    done <<EOF
+$mw
+EOF
+fi
+
 # ===== API-overflow gate + ledger =====
 # Billing crosses over to the company API account when EITHER cap is hit, and
 # nothing in the payload flags which requests were billed that way — so infer
@@ -331,6 +477,7 @@ gate=0
 if [ -n "$five" ] || [ -n "$seven" ]; then
     gate=$(awk -v f="${five:-0}" -v s="${seven:-0}" 'BEGIN { print (f >= 100 || s >= 100) ? 1 : 0 }')
 fi
+[ "$mw_gate" = 1 ] && gate=1
 
 period=''
 budget=''
@@ -492,6 +639,13 @@ if [ -n "$seven" ]; then
     [ -n "$seven_r" ] && [ "$seven_r" -gt "$now" ] 2>/dev/null && \
         s="$s ${dim}↻$(fmt_day "$seven_r")${rst}"
     add2 "$s"
+fi
+if [ -n "$mw_segs" ]; then
+    while IFS= read -r _line; do
+        [ -n "$_line" ] && add2 "$_line"
+    done <<EOF
+$mw_segs
+EOF
 fi
 
 # ===== Line 3: session vitals =====

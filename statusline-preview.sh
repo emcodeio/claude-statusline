@@ -110,6 +110,34 @@ if [ "${1:-}" != ledger ]; then
     show "11  Fable + max effort — crimson vs alert red side by side" \
         "$(payload 'Fable 5' max 88 92 $FIVE_R 55 $SEVEN_R 1.50 "$CLEAN_REPO" 92495 385)"
 
+    # 12: model-specific weekly window, drawn from a planted OAuth cache. show()
+    # wipes the usage dir, so these plant the cache and invoke the script raw.
+    # Under CLAUDE_SL_NOW the fetch is inert and cache mtime is ignored — the
+    # planted file is trusted as-is, keeping the preview offline-deterministic.
+    # 12a/12b use the live API shape (limits[] with fractional +00:00 stamps),
+    # 12c the legacy top-level seven_day_<model> keys the parser falls back to.
+    ISO_R=$(date -u -d "@$SEVEN_R" +%Y-%m-%dT%H:%M:%S 2>/dev/null \
+            || date -u -r "$SEVEN_R" +%Y-%m-%dT%H:%M:%S)
+    ISO_R="$ISO_R.715791+00:00"
+
+    printf '\n\033[1m── %s\033[0m\n' "12a Fable weekly window — third gauge from limits[]"
+    rm -rf "$CLAUDE_USAGE_DIR"; mkdir -p "$CLAUDE_USAGE_DIR"
+    printf '{"limits":[{"kind":"session","group":"session","percent":41},{"kind":"weekly_all","group":"weekly","percent":28},{"kind":"weekly_scoped","group":"weekly","percent":62,"resets_at":"%s","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":true}]}' \
+        "$ISO_R" > "$CLAUDE_USAGE_DIR/.oauth_usage.json"
+    payload 'Fable 5' xhigh 34 41 $FIVE_R 28 $SEVEN_R 0.85 "$CLEAN_REPO" 92495 385 | sh "$SL"
+
+    printf '\n\033[1m── %s\033[0m\n' "12b Fable capped, Opus idle — gate follows the model in use"
+    rm -rf "$CLAUDE_USAGE_DIR"; mkdir -p "$CLAUDE_USAGE_DIR"
+    printf '{"limits":[{"kind":"weekly_scoped","group":"weekly","percent":100,"resets_at":"%s","scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","group":"weekly","percent":12,"resets_at":"%s","scope":{"model":{"display_name":"Opus"}}}]}' \
+        "$ISO_R" "$ISO_R" > "$CLAUDE_USAGE_DIR/.oauth_usage.json"
+    payload 'Fable 5' xhigh 34 41 $FIVE_R 62 $SEVEN_R 1.20 "$CLEAN_REPO" 92495 385 | sh "$SL"
+
+    printf '\n\033[1m── %s\033[0m\n' "12c Legacy shape — top-level seven_day_opus, epoch reset"
+    rm -rf "$CLAUDE_USAGE_DIR"; mkdir -p "$CLAUDE_USAGE_DIR"
+    printf '{"seven_day_opus":{"utilization":62,"resets_at":%s}}' "$SEVEN_R" \
+        > "$CLAUDE_USAGE_DIR/.oauth_usage.json"
+    payload 'Opus 5 (1M context)' xhigh 34 41 $FIVE_R 28 $SEVEN_R 0.85 "$CLEAN_REPO" 92495 385 | sh "$SL"
+
     printf '\n'
 fi
 
