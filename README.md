@@ -6,17 +6,17 @@ A three-row [Claude Code](https://code.claude.com) status line: context and rate
 
 ```
 Opus 5 (1M) · xhigh │ ⎇ main ~1 ?12 │ ctx ▉░░░░░░░░░ 9%
-5h ███████▌░░ 75% ↑57m ↻2h10m │ 7d █████▌░░░░ 55% → ↻Sat
+5h ███████▌░░ 75% ↑57m ↻2h10m │ 7d █████▌░░░░ 55% → ↻Sat │ Fable █████▎░░░░ 52% ↑Sun 4PM ↻Mon
 $12.14 │ cache 99% │ 6:24PM │ ~/…/myproject │ Refactor the auth module
 ```
 
-POSIX shell, no dependencies beyond `jq` and the usual coreutils. ~19 subprocesses and ~160 ms per render.
+POSIX shell, no dependencies beyond `jq` and the usual coreutils (`curl` if you want the model-scoped gauge). ~19 subprocesses and ~160 ms per render.
 
 ## What you're looking at
 
 **Row 1 — identity and workspace.** Model (amber Opus, blue Sonnet, cyan Haiku, crimson Fable) · reasoning effort (dim → cyan → orange → red) │ git branch with `✓` clean or `+N` staged / `~N` modified / `?N` untracked, plus `⇡N` / `⇣N` divergence │ context-window gauge.
 
-**Row 2 — rate limits.** The 5-hour and 7-day windows, each as `gauge · percent · pace verdict · reset`.
+**Row 2 — rate limits.** The 5-hour and 7-day windows, each as `gauge · percent · pace verdict · reset` — plus a gauge per [model-scoped weekly limit](#the-model-scoped-weekly-gauge) when your plan has one, labeled with the model's name in its color.
 
 **Row 3 — session vitals.** Session cost │ cache hit rate │ last interaction │ working directory │ session name.
 
@@ -86,6 +86,25 @@ statusline-command.sh sync 45.00        # offset every session, re-anchor to a r
 
 `sync` writes a negative offset per session so live sessions keep accruing from that point without double-counting.
 
+## The model-scoped weekly gauge
+
+Some plans carry a weekly limit for one specific model on top of the all-models window — the extra row on claude.ai's usage page. Claude Code doesn't pass it to the status line: the payload's `rate_limits` has exactly `five_hour` and `seven_day`, in every version to date. The only place the number exists is the OAuth usage endpoint claude.ai itself reads (`api.anthropic.com/api/oauth/usage`), so this script reads it too — with the constraint that a status line redraws every few seconds and that endpoint 429s eagerly even at modest polling rates.
+
+The design keeps the network off the render path entirely:
+
+- A render that finds the refresh stamp older than **5 minutes** advances the stamp and hands the fetch to a **detached background job**; the gauge always draws from the cache file the last successful fetch left behind (`~/.claude/usage/.oauth_usage.json`).
+- The stamp advances even when the fetch fails, so a dead endpoint or a denied keychain costs one attempt per interval, not one per redraw.
+- An error body never overwrites the cache — a 429 or an expired token can't blank a gauge that had good data. The raw response always lands next to the cache (`.oauth_usage.json.raw`) for debugging.
+- Data older than an hour hides the gauge rather than rendering it. A gauge is a claim about *now*; an hour-old figure with a pace arrow on it is a lie.
+
+Model-scoped windows arrive in the response's `limits[]` array (`kind: "weekly_scoped"`, model name under `.scope`); the older top-level `seven_day_<model>` keys — null fossils on current accounts — are kept as a fallback. Each window renders after the 7d gauge with the same weekly pace model and reset marker, and a scoped window at 100% opens the 🤑 overflow gate **only when it caps the model you're actually running** — Opus capped doesn't gate a Sonnet session.
+
+The OAuth token is found by trying, in order: `~/.claude/.credentials.json` (Linux, and silent), the macOS keychain item keyed by your login name, then any `Claude Code-credentials` item. Every candidate passes an expiry pre-check before it's spent on a request — the endpoint's rate limiting is too aggressive to burn a call on a token a local timestamp already condemns. macOS may show one keychain consent dialog on first fetch; "Always Allow" ends them. The token never touches disk and never leaves the machine except to Anthropic's own endpoint.
+
+Set `CLAUDE_SL_NO_OAUTH=1` to turn the whole thing off — no fetch, no gauge, everything else untouched.
+
+Worth being honest about: the endpoint is unofficial and undocumented, so its shape can change without notice. When it does, the gauge disappears (the parser finds nothing) rather than rendering garbage — and the rest of the status line doesn't care.
+
 ## Install
 
 Requires Claude Code and `jq`.
@@ -115,7 +134,7 @@ Symlinking (rather than copying) means every edit you make is already in the wor
 ### Preview every state without waiting for it
 
 ```sh
-bash statusline-preview.sh          # 11 render states
+bash statusline-preview.sh          # 14 render states
 bash statusline-preview.sh ledger   # ledger + month-rollover assertions
 ```
 
@@ -148,6 +167,8 @@ Each of these cost real debugging time.
 **Tab is IFS whitespace.** Splitting `@tsv` output with `IFS=$'\t'` collapses consecutive tabs into one delimiter, so a single empty field silently shifts every field after it. Read newline-delimited instead.
 
 **`## No commits yet on <branch>`.** Git's porcelain branch header on an unborn HEAD isn't a branch name. Strip the prefix or the status line reports the whole sentence as your branch.
+
+**`security find-generic-password` returns *a* match, not *the* match.** Old Claude Code versions leave a fossil item on the same `Claude Code-credentials` service (account `"Claude Code"`), and the bare `-s` lookup happily returns its long-expired token while the live one — keyed by your login name — sits right next to it. Query with `-a "$USER"` first, and pre-check `expiresAt` before trusting anything either lookup returns.
 
 **Subprocess count is the performance budget.** This redraws constantly, so each helper collapses its work into a single `awk`, git state comes from one combined `status --porcelain --branch` (28 ms versus 79 ms for three separate calls), and the `date` flavour is probed once rather than per call.
 
