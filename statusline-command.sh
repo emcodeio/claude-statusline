@@ -396,10 +396,15 @@ if [ -z "${CLAUDE_SL_NO_OAUTH:-}" ]; then
                     [ -z "$_resp" ] && continue
                     # .raw always lands (debuggability); the cache only accepts
                     # a body that looks like usage data, so an error envelope
-                    # cannot clobber the last good figures.
+                    # cannot clobber the last good figures. Any response ends
+                    # the loop: an error body here means a 429 or a revoked
+                    # grant, and the next source usually resolves to the same
+                    # token — retrying it would burn requests this endpoint
+                    # can't spare. One HTTP attempt per interval, literally.
                     printf '%s' "$_resp" > "$oauth_cache.raw"
                     printf '%s' "$_resp" | jq -e 'has("limits") or has("five_hour") or has("seven_day")' >/dev/null 2>&1 \
-                        && { printf '%s' "$_resp" > "$oauth_cache"; break; }
+                        && printf '%s' "$_resp" > "$oauth_cache"
+                    break
                 done
             ) </dev/null >/dev/null 2>&1 &
         fi
