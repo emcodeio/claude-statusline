@@ -398,7 +398,7 @@ if [ -z "${CLAUDE_SL_NO_OAUTH:-}" ]; then
                     # a body that looks like usage data, so an error envelope
                     # cannot clobber the last good figures.
                     printf '%s' "$_resp" > "$oauth_cache.raw"
-                    printf '%s' "$_resp" | jq -e 'has("five_hour") or has("seven_day")' >/dev/null 2>&1 \
+                    printf '%s' "$_resp" | jq -e 'has("limits") or has("five_hour") or has("seven_day")' >/dev/null 2>&1 \
                         && { printf '%s' "$_resp" > "$oauth_cache"; break; }
                 done
             ) </dev/null >/dev/null 2>&1 &
