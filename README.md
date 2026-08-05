@@ -1,6 +1,6 @@
 # claude-statusline
 
-A three-row [Claude Code](https://code.claude.com) status line: context and rate-limit gauges with **pace projection**, and a cost ledger that tracks spend once your subscription caps are exhausted.
+A three-row [Claude Code](https://code.claude.com) status line: context and rate-limit gauges with **pace projection**, and your month-to-date extra-usage spend read straight from Anthropic's own meter.
 
 ![statusline](screenshot.svg)
 
@@ -57,34 +57,32 @@ Both sides are averages, so burstiness cancels. Units differ to match: the 5h wi
 - **In the first 2% of a window** — no arrow at all. Early projections divide by a tiny elapsed time and produce nonsense.
 - **When exhaustion would land past the reset** — arrow shows, timestamp doesn't. You can be over allowance and still never run out, because the window refills first.
 
-## The API-overflow ledger
+## The extra-usage spend figure
 
-If your plan bills API usage once subscription caps are hit, row 3's second figure tracks that spend.
+If your plan bills extra usage once subscription caps are hit, row 3's second figure is your month-to-date spend on it.
 
 ```
-$12.14 · $4.37 🤑
+$12.14 ·$480.80 🤑
 └ green   └ red
 ```
 
-The green figure is `cost.total_cost_usd` — **this session**, every token, subscription-covered or not. The red figure is **company-billed overflow across all sessions this calendar month**, and it only appears once it's non-zero.
+The green figure is `cost.total_cost_usd` — **this session**, every token, subscription-covered or not. The red figure is **Anthropic's own extra-usage meter**: `spend.used` from the OAuth usage response, the same number the [usage page](https://claude.ai/settings/usage) shows. It appears once it's non-zero and hides when the cache is stale, unreachable, or the account has no extra usage.
 
-Three things worth being honest about:
+It costs no extra network traffic — the [model-scoped gauge](#the-model-scoped-weekly-gauge) already refreshes that cache every five minutes, and this reads one more field out of it. `spend.used` is minor units plus an exponent (`48080` at exponent `2` is `$480.80`), so no float parsing is involved; the older `extra_usage.used_credits` / `decimal_places` pair carries the same number and is kept as a fallback.
 
-1. **The gate is an inference.** Nothing in the status-line payload marks a request as API-billed. The script infers it from cap exhaustion (`five_hour ≥ 100 || seven_day ≥ 100`) and accumulates deltas only while that holds. If your plan's overflow triggers on something else, the figure measures the wrong thing.
-2. **The dollar amount is an estimate.** Claude Code computes it client-side at list rates; the docs say plainly it "may differ from your actual bill."
-3. **A session's first sighting accrues nothing.** It records a baseline instead, because there's no way to know how much of an already-accumulated total was spent behind an open gate. Without this, installing the script mid-session while capped would book the entire session as overflow.
+There's nothing to reconcile, which is the point — it *is* the invoice figure. Set an optional denominator with `statusline-command.sh budget 200` to render it as `$480.80/200`.
 
-Ledger state lives in `~/.claude/usage/YYYY-MM/<session-id>`. Month scoping is the directory itself — the summing glob only ever sees the current month, so there's no timestamp filter and no rollover job to forget. A session running across midnight on the 1st carries its `last_cost` forward, so the delta straddling the boundary is neither lost nor double-counted.
+### Why this replaced a local ledger
 
-### Reconciling against a real invoice
+Earlier versions accumulated `cost.total_cost_usd` deltas into per-session files under `~/.claude/usage/YYYY-MM/`, gated on cap exhaustion. On the account this was developed against it read **$1266.13 against an actual $480.80** — 2.6× high, for two independent reasons.
 
-```sh
-statusline-command.sh budget 200        # show the figure as $X/200
-statusline-command.sh usage 41.10       # overwrite this month's anchor
-statusline-command.sh sync 45.00        # offset every session, re-anchor to a real number
-```
+**The quantity was wrong.** `total_cost_usd` prices every token at list API rates, and the gate is all-or-nothing: once `five_hour ≥ 100 || seven_day ≥ 100`, *all* of a session's cost delta was booked as overflow. That is not the same thing as credits consumed, and no amount of care in the accumulator would have made it so. Four sessions in that month had an accrued total equal to their entire session cost, to the cent.
 
-`sync` writes a negative offset per session so live sessions keep accruing from that point without double-counting.
+**And the arithmetic was wrong too**, for about $240 of it. `total_cost_usd` is not monotonic — a resumed session re-reports from a lower baseline. The accumulator floored negative deltas at zero, which is right, but then kept the accrued total *and* rewrote `last_cost` downward, so the whole climb back was counted a second time. The tell is visible in the old state files: one session's `accum` was $1145.11 against its own `last_cost` of $904.63, and a sum of non-negative deltas cannot exceed the counter's final value. Reconstructing that session independently from its transcript's per-request `usage` (plus 72 subagent transcripts) put it at ~$788 at list rates, confirming `last_cost` as the sound side.
+
+Both failure modes are structurally impossible now: the figure is a field read from a response, not a running total. `statusline-preview.sh spend` asserts that — including that the figure stays pinned across six renders with a rising cost and a dip to zero.
+
+Old `~/.claude/usage/YYYY-MM/` directories are inert; delete them at your leisure.
 
 ## The model-scoped weekly gauge
 
@@ -97,11 +95,13 @@ The design keeps the network off the render path entirely:
 - An error body never overwrites the cache — a 429 or an expired token can't blank a gauge that had good data. The raw response always lands next to the cache (`.oauth_usage.json.raw`) for debugging.
 - Data older than an hour hides the gauge rather than rendering it. A gauge is a claim about *now*; an hour-old figure with a pace arrow on it is a lie.
 
-Model-scoped windows arrive in the response's `limits[]` array (`kind: "weekly_scoped"`, model name under `.scope`); the older top-level `seven_day_<model>` keys — null fossils on current accounts — are kept as a fallback. Each window renders after the 7d gauge with the same weekly pace model and reset marker, and a scoped window at 100% opens the 🤑 overflow gate **only when it caps the model you're actually running** — Opus capped doesn't gate a Sonnet session.
+Model-scoped windows arrive in the response's `limits[]` array (`kind: "weekly_scoped"`, model name under `.scope`); the older top-level `seven_day_<model>` keys — null fossils on current accounts — are kept as a fallback. Each window renders after the 7d gauge with the same weekly pace model and reset marker, and a scoped window at 100% raises the 🤑 glyph **only when it caps the model you're actually running** — Opus capped doesn't flag a Sonnet session.
+
+🤑 means *a cap is exhausted right now*, and nothing more. It's read off the payload's rate-limit percentages, which is a fact you can know locally; it deliberately no longer attributes any dollar amount, since that was the inference that made the old ledger wrong.
 
 The OAuth token is found by trying, in order: `~/.claude/.credentials.json` (Linux, and silent), the macOS keychain item keyed by your login name, then any `Claude Code-credentials` item. Every candidate passes an expiry pre-check before it's spent on a request — the endpoint's rate limiting is too aggressive to burn a call on a token a local timestamp already condemns. macOS may show one keychain consent dialog on first fetch; "Always Allow" ends them. The token never touches disk and never leaves the machine except to Anthropic's own endpoint.
 
-Set `CLAUDE_SL_NO_OAUTH=1` to turn the whole thing off — no fetch, no gauge, everything else untouched.
+Set `CLAUDE_SL_NO_OAUTH=1` to turn the whole thing off — no fetch, no gauge, and no spend figure (it reads the same cache). Rows 1 and 2's other segments are untouched.
 
 Worth being honest about: the endpoint is unofficial and undocumented, so its shape can change without notice. When it does, the gauge disappears (the parser finds nothing) rather than rendering garbage — and the rest of the status line doesn't care.
 
@@ -135,10 +135,10 @@ Symlinking (rather than copying) means every edit you make is already in the wor
 
 ```sh
 bash statusline-preview.sh          # 14 render states
-bash statusline-preview.sh ledger   # ledger + month-rollover assertions
+bash statusline-preview.sh spend    # spend-figure + regression assertions
 ```
 
-The harness is hermetic: it builds its own clean and dirty git repos, redirects the ledger to a scratch dir, and pins the clock so pace projections are deterministic. It never touches `~/.claude/usage`.
+The harness is hermetic: it builds its own clean and dirty git repos, redirects the usage dir to a scratch dir, and pins the clock so pace projections are deterministic. It never touches `~/.claude/usage`. The `spend` mode exits non-zero on any failed assertion, so it works as a pre-commit check.
 
 ### Regenerating the screenshot
 
@@ -174,7 +174,7 @@ Each of these cost real debugging time.
 
 ## Credit
 
-The pace-arrow idea — projecting end-of-window usage and surfacing it as a single glyph — comes from [vfmatzkin/claude-statusline](https://github.com/vfmatzkin/claude-statusline). The gauges, the daily-allowance model for the weekly window, and the overflow ledger are this implementation's own.
+The pace-arrow idea — projecting end-of-window usage and surfacing it as a single glyph — comes from [vfmatzkin/claude-statusline](https://github.com/vfmatzkin/claude-statusline). The gauges, the daily-allowance model for the weekly window, and the extra-usage spend readout are this implementation's own.
 
 ## License
 

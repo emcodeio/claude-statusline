@@ -3,9 +3,9 @@
 # eyeballed without waiting for the real conditions to occur.
 #
 #   bash ~/.claude/statusline-preview.sh          # all states
-#   bash ~/.claude/statusline-preview.sh ledger   # ledger sequence only
+#   bash ~/.claude/statusline-preview.sh spend    # spend assertions only
 #
-# The ledger is redirected to a scratch dir — previewing never touches
+# The usage dir is redirected to a scratch dir — previewing never touches
 # ~/.claude/usage.
 
 SL="${SL:-$HOME/.claude/statusline-command.sh}"
@@ -42,7 +42,7 @@ SEVEN_R=$((NOW + 259200))            # 3d left of 7d     → 4d elapsed
 show() {
     printf '\n\033[1m── %s\033[0m\n' "$1"
     shift
-    # Fresh ledger per state, or spend from an earlier preview bleeds into later ones.
+    # Fresh usage dir per state, so a planted cache never bleeds into the next.
     rm -rf "$CLAUDE_USAGE_DIR"
     printf '%s' "$1" | sh "$SL"
 }
@@ -76,7 +76,7 @@ payload() {
         } | del(..|nulls)'
 }
 
-if [ "${1:-}" != ledger ]; then
+if [ "${1:-}" != spend ]; then
     show "1  Fresh session — no rate_limits, no cost" \
         "$(payload 'Opus 5 (1M context)' xhigh 3 '' '' '' '' '' "$DIRTY_REPO" 0 0)"
 
@@ -141,54 +141,91 @@ if [ "${1:-}" != ledger ]; then
     printf '\n'
 fi
 
-# ---- Ledger sequence: only spend behind an open gate may accumulate ----
-printf '\n\033[1m══ Ledger correctness\033[0m\n'
-rm -rf "$CLAUDE_USAGE_DIR"
-SID=ledger-test
-MONTH=$(date -d "@$NOW" +%Y-%m 2>/dev/null || date -r "$NOW" +%Y-%m)
+# ---- Spend figure: read from Anthropic's meter, never derived locally ----
+# These are assertions, not eyeball states: each one names an expected value
+# and reports PASS/FAIL, because the claim being tested is a number's
+# provenance rather than its appearance.
+printf '\n\033[1m══ Spend figure (authoritative meter)\033[0m\n'
+FAILED=0
 
-step() {
-    printf '%s' "$2" | sh "$SL" > /dev/null
-    acc=$(awk -F= '$1=="accum"{printf "%.4f", $2}' "$CLAUDE_USAGE_DIR/$MONTH/$SID" 2>/dev/null)
-    printf '  %-46s accum=%s\n' "$1" "${acc:-<none>}"
+plant() { rm -rf "$CLAUDE_USAGE_DIR"; mkdir -p "$CLAUDE_USAGE_DIR"
+          [ -n "$1" ] && printf '%s' "$1" > "$CLAUDE_USAGE_DIR/.oauth_usage.json"; }
+
+# Row 3 joins its segments with │; the middle dot appears only between the
+# session cost and the spend figure, so it is an unambiguous anchor. Tolerate
+# whitespace around it rather than pinning the exact spacing — this asserts
+# which number is shown, not how it is padded.
+spend_of() {
+    printf '%s' "$1" | sh "$SL" \
+        | awk '{ gsub(/\033\[[0-9;]*m/, ""); print }' | tail -1 \
+        | grep -o '·[[:space:]]*\$[0-9][0-9.]*' | head -1 \
+        | sed 's/^·[[:space:]]*//'
 }
 
-step "gate CLOSED, cost 1.00  → expect 0.0000" \
-    "$(SID=$SID payload 'Opus 5' xhigh 10 40 $FIVE_R 55 $SEVEN_R 1.00 "$DIRTY_REPO" 100 100)"
-step "gate CLOSED, cost 2.00  → expect 0.0000" \
-    "$(SID=$SID payload 'Opus 5' xhigh 10 40 $FIVE_R 55 $SEVEN_R 2.00 "$DIRTY_REPO" 100 100)"
-step "gate OPEN,   cost 2.50  → expect 0.5000" \
-    "$(SID=$SID payload 'Opus 5' xhigh 10 100 $FIVE_R 55 $SEVEN_R 2.50 "$DIRTY_REPO" 100 100)"
-step "gate OPEN,   cost 3.25  → expect 1.2500" \
-    "$(SID=$SID payload 'Opus 5' xhigh 10 100 $FIVE_R 55 $SEVEN_R 3.25 "$DIRTY_REPO" 100 100)"
-step "/clear resets cost to 0 → expect 1.2500 (re-anchor)" \
-    "$(SID=$SID payload 'Opus 5' xhigh 10 100 $FIVE_R 55 $SEVEN_R 0 "$DIRTY_REPO" 100 100)"
-step "gate OPEN,   cost 0.30  → expect 1.5500" \
-    "$(SID=$SID payload 'Opus 5' xhigh 10 100 $FIVE_R 55 $SEVEN_R 0.30 "$DIRTY_REPO" 100 100)"
-step "gate CLOSES, cost 9.00  → expect 1.5500 (frozen)" \
-    "$(SID=$SID payload 'Opus 5' xhigh 10 40 $FIVE_R 55 $SEVEN_R 9.00 "$DIRTY_REPO" 100 100)"
-
-# ---- Month rollover: the total must reset at the boundary without losing
-#      the delta that straddles midnight, and without disturbing last month ----
-printf '\n\033[1m══ Month rollover\033[0m\n'
-rm -rf "$CLAUDE_USAGE_DIR"
-SID=rollover-test
-JUL=$(date -d '2026-07-31 23:59:00' +%s 2>/dev/null \
-      || date -j -f '%Y-%m-%d %H:%M:%S' '2026-07-31 23:59:00' +%s)
-AUG=$((JUL + 180))                                  # 00:02 on the 1st
-
-roll() {   # $1 label  $2 epoch  $3 cost  $4 month-to-read
-    CLAUDE_SL_NOW=$2 payload 'Opus 5' xhigh 10 100 $((2 + 18000)) '' '' "$3" "$DIRTY_REPO" 100 100 \
-        | CLAUDE_SL_NOW=$2 sh "$SL" > /dev/null
-    m=$(date -d "@$4" +%Y-%m 2>/dev/null || date -r "$4" +%Y-%m)
-    acc=$(awk -F= '$1=="accum"{printf "%.4f", $2}' "$CLAUDE_USAGE_DIR/$m/$SID" 2>/dev/null)
-    printf '  %-46s %s accum=%s\n' "$1" "$m" "${acc:-<none>}"
+expect() {   # $1 label  $2 expected ("-" = hidden)  $3 payload
+    got=$(spend_of "$3"); got=${got:--}
+    if [ "$got" = "$2" ]; then
+        printf '  \033[32mPASS\033[0m  %-44s %s\n' "$1" "$got"
+    else
+        printf '  \033[31mFAIL\033[0m  %-44s got %s, want %s\n' "$1" "$got" "$2"
+        FAILED=$((FAILED + 1))
+    fi
 }
 
-roll "Jul 31 23:59, cost 5.00 → expect 0.0000 (base)" "$JUL" 5.00 "$JUL"
-roll "Jul 31 23:59, cost 6.00 → expect 1.0000"        "$JUL" 6.00 "$JUL"
-roll "Aug 01 00:02, cost 6.50 → expect 0.5000 (new)"  "$AUG" 6.50 "$AUG"
-roll "Aug 01 00:02, cost 7.00 → expect 1.0000"        "$AUG" 7.00 "$AUG"
-printf '  %-46s %s accum=%s\n' "…and July is untouched" "$(date -d "@$JUL" +%Y-%m 2>/dev/null || date -r "$JUL" +%Y-%m)" \
-    "$(awk -F= '$1=="accum"{printf "%.4f", $2}' "$CLAUDE_USAGE_DIR/$(date -d "@$JUL" +%Y-%m 2>/dev/null || date -r "$JUL" +%Y-%m)/$SID" 2>/dev/null)"
+CAPPED="$(payload 'Opus 5' xhigh 10 100 $FIVE_R 55 $SEVEN_R 12.14 "$DIRTY_REPO" 100 100)"
+CALM="$(payload 'Opus 5' xhigh 10 40 $FIVE_R 55 $SEVEN_R 12.14 "$DIRTY_REPO" 100 100)"
+
+plant '{"limits":[],"spend":{"used":{"amount_minor":48080,"currency":"USD","exponent":2}}}'
+expect "spend.used minor units → \$480.80" '$480.80' "$CAPPED"
+
+# The behavioural change: the figure is a monthly meter reading, not something
+# earned by an open gate, so it must render with every cap well below 100.
+expect "…and shows with all caps closed" '$480.80' "$CALM"
+
+plant '{"limits":[],"extra_usage":{"used_credits":48080.0,"decimal_places":2}}'
+expect "legacy extra_usage fallback" '$480.80' "$CAPPED"
+
+plant '{"limits":[],"spend":{"used":{"amount_minor":0,"exponent":2}}}'
+expect "zero meter → hidden" '-' "$CAPPED"
+
+plant '{"limits":[]}'
+expect "no spend field → hidden" '-' "$CAPPED"
+
+plant ''
+expect "no cache at all → hidden" '-' "$CAPPED"
+
+# ---- Regression guards for the two bugs this replaced ----
+# The old ledger summed total_cost_usd deltas behind an inferred gate. It grew
+# on every render, and its negative-delta clamp re-counted the climb back after
+# a dip (a resumed session re-reporting from a lower baseline), which is how a
+# session's accum came to exceed its own last_cost. Both are now structurally
+# impossible: the figure is a file read. Assert that, don't assume it.
+printf '\n\033[1m══ Regression guards\033[0m\n'
+plant '{"limits":[],"spend":{"used":{"amount_minor":48080,"exponent":2}}}'
+SID=regression-test
+seq_cost() {   # renders one payload at $1 cost, echoes the spend figure
+    spend_of "$(SID=$SID payload 'Opus 5' xhigh 10 100 $FIVE_R 55 $SEVEN_R "$1" "$DIRTY_REPO" 100 100)"
+}
+PINNED=1
+for c in 1.00 2.00 3.25 0 0.30 9.00; do
+    v=$(seq_cost "$c")
+    [ "$v" = '$480.80' ] || { PINNED=0; printf '  cost=%-6s → %s\n' "$c" "$v"; }
+done
+if [ "$PINNED" = 1 ]; then
+    printf '  \033[32mPASS\033[0m  %-44s %s\n' \
+        "pinned across rising cost and a dip to 0" '$480.80 ×6'
+else
+    printf '  \033[31mFAIL\033[0m  %s\n' "spend figure moved with total_cost_usd"
+    FAILED=$((FAILED + 1))
+fi
+
+leftover=$(find "$CLAUDE_USAGE_DIR" -type f ! -name '.oauth_usage*' 2>/dev/null)
+if [ -z "$leftover" ]; then
+    printf '  \033[32mPASS\033[0m  %-44s %s\n' "no per-session state written" "clean"
+else
+    printf '  \033[31mFAIL\033[0m  %-44s %s\n' "per-session state written" "$leftover"
+    FAILED=$((FAILED + 1))
+fi
+
 printf '\n'
+[ "$FAILED" -eq 0 ] || { printf '\033[31m%s assertion(s) failed\033[0m\n\n' "$FAILED"; exit 1; }

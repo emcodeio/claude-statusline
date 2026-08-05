@@ -3,20 +3,30 @@
 #   1  model · effort │ ⎇ git │ agent │ ctx gauge
 #   2  5h gauge + pace projection │ 7d gauge + daily-allowance projection
 #      │ per-model weekly gauge(s), via a background-refreshed OAuth cache
-#   3  cost (+ API-overflow ledger) │ cache │ last seen │ cwd │ session name
+#   3  cost (+ extra-usage spend) │ cache │ last seen │ cwd │ session name
 #
 # settings.json invokes this via `sh`, so it is written to POSIX shell:
 # no arrays, no [[ ]], no $'...'. Escapes are built with printf instead.
 #
 # This redraws constantly, so subprocess count is the performance budget:
 # every helper collapses its work into a single awk, git state comes from one
-# combined call, and `rep`/`date` avoid re-forking. ~12 spawns per render.
+# combined call, and `rep`/`date` avoid re-forking. ~13 spawns per render.
 #
-# Reconcile subcommands — the overflow ledger is a client-side estimate, so
-# these re-anchor it against a real figure from the Anthropic console:
+# The month-to-date spend figure is Anthropic's own extra-usage meter, read
+# from the same OAuth cache that feeds the model-scoped gauge — the number the
+# console shows, not a local estimate. It replaces a client-side ledger that
+# accumulated `total_cost_usd` deltas behind an inferred billing gate; that
+# ledger read ~2.6x high, for two independent reasons. It priced every token
+# at list API rates and booked 100% of a session's cost as overflow whenever
+# any cap was exhausted, which is a different quantity than credits consumed.
+# And its negative-delta clamp double-counted: when total_cost_usd dipped (a
+# resumed session re-reporting from a lower baseline) the delta was floored at
+# zero but `accum` was kept *and* `last_cost` rewritten downward, so the climb
+# back was counted twice. That is observable in the old state files as an
+# `accum` larger than the session's own `last_cost`, which a sum of
+# non-negative deltas cannot produce.
+#
 #   budget <n>   set the budget denominator (blank = no denominator shown)
-#   usage  <n>   overwrite initial_usage outright
-#   sync   <n>   write negative per-session offsets, then re-anchor
 #
 # Testing hook: CLAUDE_SL_NOW overrides "now" so the preview harness can
 # render deterministic pace projections.
@@ -24,7 +34,7 @@
 set -f
 
 usage_dir="${CLAUDE_USAGE_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}/usage}"
-config="$usage_dir/.config"          # standing settings (budget) — not month-scoped
+config="$usage_dir/.config"          # standing settings (budget)
 
 # BSD `date` takes -r, GNU takes -d @. Probe once, lazily, then reuse — the
 # naive `date -r … || date -d @…` chain pays for a failed exec on every call.
@@ -40,12 +50,6 @@ fmt_at() {
         date -d "@$1" +"$2" 2>/dev/null
     fi
 }
-
-# The overflow ledger is scoped to a calendar month by writing into a
-# YYYY-MM subdirectory: the summing glob then only ever sees the current
-# month, with no timestamp filtering and no rollover job to forget.
-# Past months stay on disk as history.
-ym() { fmt_at "${1:-$(date +%s)}" '%Y-%m'; }
 
 # Rewrite one key=value in a file. Deliberately NOT `sed -i` — this machine
 # pairs BSD sed with GNU coreutils, and the two disagree on -i's syntax.
@@ -70,46 +74,26 @@ case "${1:-}" in
         exit 0
         ;;
     usage|sync)
-        [ -z "${2:-}" ] && { echo "usage: $0 $1 <amount>" >&2; exit 1; }
-        # Anchoring is per-month because invoices are: the figure you read off
-        # the console is this month's, so it belongs in this month's dir.
-        _md="$usage_dir/$(ym)"
-        if [ "$1" = sync ]; then
-            # Cancel every session's accrued total with an equal negative
-            # offset, then re-anchor. Live sessions keep accruing from here;
-            # dead ones net to zero.
-            mkdir -p "$_md"
-            set +f
-            for f in "$_md"/*; do
-                [ -f "$f" ] || continue
-                case "${f##*/}" in *_offset) continue ;; esac
-                a=$(awk -F= '$1 == "accum" { print $2; exit }' "$f")
-                [ -z "$a" ] && continue
-                awk -v a="$a" 'BEGIN { printf "accum=%.6f\n", -a }' > "${f}_offset"
-            done
-            set -f
-        fi
-        kv_set "$_md/.anchor" initial_usage "$2"
-        echo "$_md/.anchor:"; cat "$_md/.anchor"
-        [ -f "$config" ] && { echo "$config:"; cat "$config"; }
-        exit 0
+        # Both existed to re-anchor a local estimate against a real console
+        # figure. The spend figure now *is* the console figure, so there is
+        # nothing to reconcile — and a stale manual anchor would only be able
+        # to make it wrong again.
+        cat >&2 <<'MSG'
+`usage` and `sync` are gone: the spend figure is read from Anthropic's own
+extra-usage meter (spend.used in the OAuth usage cache), so there is no local
+estimate left to re-anchor. Use `budget <n>` to set the denominator.
+MSG
+        exit 1
         ;;
 esac
 
 input=$(cat)
 [ -z "$input" ] && { printf 'Claude'; exit 0; }
 
-# Epoch and YYYY-MM in one call — the ledger always wants both, and this is
-# the hot path. Under the test override the month is derived via ym() instead,
-# so a fixed CLAUDE_SL_NOW still lands in the right month directory.
 if [ -n "${CLAUDE_SL_NOW:-}" ]; then
     now=$CLAUDE_SL_NOW
-    _month=''
 else
-    # shellcheck disable=SC2046
-    set -- $(date '+%s %Y-%m')
-    now=$1
-    _month=$2
+    now=$(date +%s)
 fi
 
 # ===== Palette (24-bit truecolor) =====
@@ -346,6 +330,7 @@ mtime_of() {
 }
 
 mw=''
+spend=''
 if [ -z "${CLAUDE_SL_NO_OAUTH:-}" ]; then
     if [ -z "${CLAUDE_SL_NOW:-}" ]; then
         # 5-minute TTL: the endpoint 429s eagerly (anthropics/claude-code
@@ -443,6 +428,25 @@ if [ -z "${CLAUDE_SL_NO_OAUTH:-}" ]; then
                         + ((.value.resets_at | ep) | tostring)
                   end
             ' "$oauth_cache" 2>/dev/null)
+
+            # Month-to-date extra-usage spend — Anthropic's own meter, and the
+            # figure the console shows. Read as minor units + exponent so no
+            # float parsing is involved: 48080 at exponent 2 is $480.80. The
+            # older `extra_usage.used_credits` / `decimal_places` pair carries
+            # the same number and is kept as a fallback for earlier shapes.
+            # Absent on accounts with no extra usage enabled, in which case
+            # both branches yield nothing and the figure stays hidden.
+            spend=$(jq -r '
+                def money($v; $exp):
+                    if ($v | type) == "number"
+                    then (($v / pow(10; $exp)) | tostring)
+                    else empty end;
+                (.spend.used | select(. != null)
+                    | money(.amount_minor; (.exponent // 2)))
+                // (.extra_usage | select(. != null)
+                    | money(.used_credits; (.decimal_places // 2)))
+                // empty
+            ' "$oauth_cache" 2>/dev/null)
         fi
     fi
 fi
@@ -474,77 +478,23 @@ $mw
 EOF
 fi
 
-# ===== API-overflow gate + ledger =====
-# Billing crosses over to the company API account when EITHER cap is hit, and
-# nothing in the payload flags which requests were billed that way — so infer
-# it from cap exhaustion and accumulate deltas locally.
+# ===== Cap-exhaustion indicator =====
+# Read straight off the payload's rate-limit percentages: a fact about *now*,
+# not an inference about billing. It drives the 🤑 glyph only — the dollar
+# figure beside it comes from Anthropic's meter (see `spend`, above), so
+# nothing here attributes cost to a window. Keeping the two separate is the
+# point: exhaustion is knowable locally, spend is not.
 gate=0
 if [ -n "$five" ] || [ -n "$seven" ]; then
     gate=$(awk -v f="${five:-0}" -v s="${seven:-0}" 'BEGIN { print (f >= 100 || s >= 100) ? 1 : 0 }')
 fi
+# A model-scoped window counts only when it caps the model actually in use.
 [ "$mw_gate" = 1 ] && gate=1
 
-period=''
+# Optional denominator on the spend figure ($480.80/200), set via `budget`.
 budget=''
-if [ -n "$sess_id" ] && [ -n "$cost" ]; then
-    mdir="$usage_dir/${_month:-$(ym "$now")}"
-    mkdir -p "$mdir"
-    sess_file="$mdir/$sess_id"
-    fresh=1
-    prev_cost=$cost
-    prev_accum=0
-    if [ -f "$sess_file" ]; then
-        fresh=0
-        # shellcheck disable=SC2046
-        set -- $(awk -F= '
-            $1 == "last_cost" { c = $2 }
-            $1 == "accum"     { a = $2 }
-            END { printf "%s %s", (c == "" ? 0 : c), (a == "" ? 0 : a) }
-        ' "$sess_file")
-        prev_cost=$1
-        prev_accum=$2
-    else
-        # A session that was already accruing last month carries its last_cost
-        # forward, so the delta straddling midnight on the 1st is neither lost
-        # nor double-counted. `accum` still starts at 0 — that is the point of
-        # month scoping. On any other day this path resolves to the same
-        # directory and finds nothing, so it costs one stat.
-        _prev="$usage_dir/$(ym $((now - 86400)))/$sess_id"
-        if [ -f "$_prev" ]; then
-            _pc=$(awk -F= '$1 == "last_cost" { print $2; exit }' "$_prev")
-            [ -n "$_pc" ] && prev_cost=$_pc
-        fi
-    fi
-    # First sighting of a session baselines at the current total and accrues
-    # nothing: we cannot know how much of an already-accumulated cost was spent
-    # behind an open gate. Starting from 0 would book the whole session as
-    # overflow the moment the script first runs while a cap happens to be hit.
-    # A negative delta means /clear reset the counter — re-anchor, never subtract.
-    new_accum=$(awk -v c="$cost" -v p="$prev_cost" -v a="$prev_accum" -v g="$gate" 'BEGIN {
-        d = c - p; if (d < 0) d = 0
-        if (g == 1) a = a + d
-        printf "%.6f", a
-    }')
-    # Only touch the disk when something changed — or to lay down the baseline.
-    if [ "$fresh" = 1 ] || [ "$cost" != "$prev_cost" ]; then
-        printf 'last_cost=%s\naccum=%s\nts=%s\n' "$cost" "$new_accum" "$now" > "$sess_file"
-    fi
-
-    initial_usage=''
-    # budget is standing; the anchor is this month's, matching how invoices arrive.
-    # shellcheck disable=SC1090
-    [ -f "$config" ] && . "$config" 2>/dev/null
-    # shellcheck disable=SC1090
-    [ -f "$mdir/.anchor" ] && . "$mdir/.anchor" 2>/dev/null
-    set +f
-    # Globbing the month dir IS the month filter. Dotfiles (.anchor) are
-    # excluded by the glob, so they never land in the sum.
-    period=$(awk -F= -v i="${initial_usage:-0}" '
-        $1 == "accum" { s += $2 }
-        END { printf "%.2f", s + i }
-    ' "$mdir"/* 2>/dev/null)
-    set -f
-fi
+# shellcheck disable=SC1090
+[ -f "$config" ] && . "$config" 2>/dev/null
 
 # ===== Line 1: identity =====
 l1=''
@@ -657,14 +607,19 @@ fi
 l3=''
 if [ -n "$cost" ]; then
     # Session cost stays green in every state — it is informational, not an
-    # alarm. The overflow figure (always red) and 🤑 carry the billing signal,
+    # alarm. The spend figure (always red) and 🤑 carry the billing signal,
     # and the contrast makes the two figures readable at a glance.
     s=$(printf '%s$%.2f%s' "$c_good" "$cost" "$rst")
-    # The ledger only accrues behind the gate, so hide it until it is earned.
-    if [ -n "$period" ] && [ "$period" != "0.00" ]; then
-        s="$s ${dim}·${rst}$(printf '%s$%.2f%s' "$c_alert" "$period" "$rst")"
-        [ -n "$budget" ] && s="$s${dim}/${budget}${rst}"
-    fi
+    # Hidden at zero (or absent, when the cache is stale/unreachable or the
+    # account has no extra usage) — an empty meter is not news. Matched as a
+    # string so the common case costs no extra spawn.
+    case "$spend" in
+        ''|0|0.0|0.00|0.000) ;;
+        *)
+            s="$s ${dim}·${rst}$(printf '%s$%.2f%s' "$c_alert" "$spend" "$rst")"
+            [ -n "$budget" ] && s="$s${dim}/${budget}${rst}"
+            ;;
+    esac
     [ "$gate" = 1 ] && s="$s 🤑"
     add3 "$s"
 fi
