@@ -14,17 +14,19 @@
 <tspan x="207.20"> </tspan>
 <tspan x="215.60" fill="#c678dd">main</tspan>
 <tspan x="249.20"> </tspan>
-<tspan x="257.60" fill="#50c878">+7</tspan>
-<tspan x="274.40"> </tspan>
-<tspan x="282.80" fill="#e6c800">~3</tspan>
-<tspan x="299.60"> </tspan>
-<tspan x="308.00" opacity="0.55">│</tspan>
+<tspan x="257.60" fill="#50c878">✓</tspan>
+<tspan x="266.00"> </tspan>
+<tspan x="274.40" opacity="0.55">│</tspan>
+<tspan x="282.80"> </tspan>
+<tspan x="291.20" opacity="0.55">ctx</tspan>
 <tspan x="316.40"> </tspan>
-<tspan x="324.80" opacity="0.55">ctx</tspan>
-<tspan x="350.00"> </tspan>
-<tspan x="358.40" fill="#56b6c2">███▍</tspan>
-<tspan x="392.00" fill="#56b6c2" opacity="0.55">░░░░░░ </tspan>
-<tspan x="450.80" fill="#56b6c2" opacity="0.55">34%</tspan>
+<tspan x="324.80" fill="#56b6c2">███▍</tspan>
+<tspan x="358.40" fill="#56b6c2" opacity="0.55">░░░░░░ </tspan>
+<tspan x="417.20" fill="#56b6c2" opacity="0.55">34%</tspan>
+<tspan x="442.40"> </tspan>
+<tspan x="450.80" opacity="0.55">│</tspan>
+<tspan x="459.20"> </tspan>
+<tspan x="467.60" opacity="0.55">you</tspan>
 </text>
 <text y="46.40" fill="#c5c8c6">
 <tspan x="14.00" opacity="0.55">5h</tspan>

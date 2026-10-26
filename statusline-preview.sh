@@ -2,19 +2,29 @@
 # Renders statusline-command.sh against synthetic payloads so every state can be
 # eyeballed without waiting for the real conditions to occur.
 #
-#   bash ~/.claude/statusline-preview.sh          # all states
-#   bash ~/.claude/statusline-preview.sh spend    # spend assertions only
+#   bash ~/.claude/statusline-preview.sh            # all states
+#   bash ~/.claude/statusline-preview.sh spend      # spend assertions only
+#   bash ~/.claude/statusline-preview.sh account    # account assertions only
 #
 # The usage dir is redirected to a scratch dir — previewing never touches
-# ~/.claude/usage.
+# ~/.claude/usage. So is the config dir: the account label reads a planted
+# .claude.json, never yours.
 
 SL="${SL:-$HOME/.claude/statusline-command.sh}"
+MODE="${1:-}"
 NOW=1785340000                       # fixed clock → deterministic projections
 export CLAUDE_SL_NOW=$NOW
 
 SCRATCH=$(mktemp -d)
 trap 'rm -rf "$SCRATCH"' EXIT
 export CLAUDE_USAGE_DIR="$SCRATCH/usage"
+
+# A placeholder account, so every state shows the label without reading the
+# real ~/.claude.json. The OAuth fetch is inert under CLAUDE_SL_NOW, so moving
+# the config dir doesn't change where (or whether) a token is looked up.
+export CLAUDE_CONFIG_DIR="$SCRATCH/config"
+mkdir -p "$CLAUDE_CONFIG_DIR"
+printf '{"oauthAccount":{"emailAddress":"you@example.com"}}' > "$CLAUDE_CONFIG_DIR/.claude.json"
 
 # Two throwaway repos for the git-segment contrast cases: one with a clean
 # working tree, one dirty. Both are built here so the harness is hermetic —
@@ -76,7 +86,7 @@ payload() {
         } | del(..|nulls)'
 }
 
-if [ "${1:-}" != spend ]; then
+if [ -z "$MODE" ]; then
     show "1  Fresh session — no rate_limits, no cost" \
         "$(payload 'Opus 5 (1M context)' xhigh 3 '' '' '' '' '' "$DIRTY_REPO" 0 0)"
 
@@ -141,12 +151,110 @@ if [ "${1:-}" != spend ]; then
     printf '\n'
 fi
 
+FAILED=0
+
+finish() {
+    printf '\n'
+    [ "$FAILED" -eq 0 ] || { printf '\033[31m%s assertion(s) failed\033[0m\n\n' "$FAILED"; exit 1; }
+    exit 0
+}
+
+# ---- Account label: the name before the @, from Claude Code's own config ----
+# Assertions rather than states: what matters is which file the name came
+# from and when the cache is trusted, not how the label looks.
+if [ -z "$MODE" ] || [ "$MODE" = account ]; then
+    printf '\n\033[1m══ Account label\033[0m\n'
+
+    ACCT="$SCRATCH/acct"
+    ACCT_PAYLOAD="$(payload 'Opus 5 (1M context)' xhigh 10 '' '' '' '' '' "$CLEAN_REPO" 0 0)"
+
+    plant_acct() {   # $1 config dir  $2 email ("" = no oauthAccount)
+        mkdir -p "$1"
+        if [ -n "$2" ]; then
+            printf '{"oauthAccount":{"emailAddress":"%s"}}' "$2" > "$1/.claude.json"
+        else
+            printf '{}' > "$1/.claude.json"
+        fi
+    }
+
+    # Row 1's last │ segment, ANSI stripped. The ctx gauge sits just before
+    # the label, so a last segment that is the gauge means the label is hidden.
+    acct_expect() {   # $1 label  $2 expected ("-" = hidden)  $3.. env for the render
+        _lbl=$1; _want=$2; shift 2
+        got=$(printf '%s' "$ACCT_PAYLOAD" | env "$@" sh "$SL" | awk '
+            { gsub(/\033\[[0-9;]*m/, ""); n = split($0, p, "│"); s = p[n]
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+              print (s ~ /^ctx/) ? "-" : s; exit }')
+        if [ "$got" = "$_want" ]; then
+            printf '  \033[32mPASS\033[0m  %-44s %s\n' "$_lbl" "$got"
+        else
+            printf '  \033[31mFAIL\033[0m  %-44s got %s, want %s\n' "$_lbl" "$got" "$_want"
+            FAILED=$((FAILED + 1))
+        fi
+    }
+
+    plant_acct "$ACCT/you" you@example.com
+    acct_expect "name before the @" you \
+        CLAUDE_CONFIG_DIR="$ACCT/you" CLAUDE_USAGE_DIR="$ACCT/u1"
+
+    plant_acct "$ACCT/apikey" ''
+    acct_expect "no oauthAccount (API key) → hidden" - \
+        CLAUDE_CONFIG_DIR="$ACCT/apikey" CLAUDE_USAGE_DIR="$ACCT/u2"
+
+    acct_expect "CLAUDE_SL_NO_ACCOUNT=1 → hidden" - \
+        CLAUDE_SL_NO_ACCOUNT=1 CLAUDE_CONFIG_DIR="$ACCT/you" CLAUDE_USAGE_DIR="$ACCT/u3"
+
+    plant_acct "$ACCT/long" abcdefghijklmnopqrstuvwxyz0123@example.com
+    acct_expect "30-char name → 19 + …" 'abcdefghijklmnopqrs…' \
+        CLAUDE_CONFIG_DIR="$ACCT/long" CLAUDE_USAGE_DIR="$ACCT/u4"
+
+    # The screenshot guard. A fake HOME stands in for the real one; the control
+    # proves the same setup *would* read it on a live clock, so the guard check
+    # can't pass vacuously. OAuth is off in the control — a live clock would
+    # otherwise start a token lookup.
+    plant_acct "$ACCT/home" leak@example.com
+    acct_expect "control: live clock reads HOME/.claude.json" leak \
+        -u CLAUDE_CONFIG_DIR -u CLAUDE_SL_NOW CLAUDE_SL_NO_OAUTH=1 \
+        HOME="$ACCT/home" CLAUDE_USAGE_DIR="$ACCT/u5a"
+    acct_expect "CLAUDE_SL_NOW, no config dir → hidden" - \
+        -u CLAUDE_CONFIG_DIR HOME="$ACCT/home" CLAUDE_USAGE_DIR="$ACCT/u5b"
+
+    # One usage dir shared by two config dirs: the cache must never hand one
+    # account's name to the other, even when the other's file is older.
+    plant_acct "$ACCT/alice" alice@example.com
+    plant_acct "$ACCT/bob" bob@example.com
+    touch -t 200001010000 "$ACCT/bob/.claude.json"
+    acct_expect "shared usage dir: first account" alice \
+        CLAUDE_CONFIG_DIR="$ACCT/alice" CLAUDE_USAGE_DIR="$ACCT/u6"
+    acct_expect "…second account, older file than cache" bob \
+        CLAUDE_CONFIG_DIR="$ACCT/bob" CLAUDE_USAGE_DIR="$ACCT/u6"
+    acct_expect "…back to the first" alice \
+        CLAUDE_CONFIG_DIR="$ACCT/alice" CLAUDE_USAGE_DIR="$ACCT/u6"
+
+    # Same config dir, cache trust. A cache newer than its source is served as
+    # is (planting "eve" behind it proves no re-read); a source newer than the
+    # cache is re-read. Ages are set on the files rather than slept for.
+    plant_acct "$ACCT/carol" carol@example.com
+    touch -t 200001010000 "$ACCT/carol/.claude.json"
+    acct_expect "fresh config dir" carol \
+        CLAUDE_CONFIG_DIR="$ACCT/carol" CLAUDE_USAGE_DIR="$ACCT/u7"
+    plant_acct "$ACCT/carol" eve@example.com
+    touch -t 200001010000 "$ACCT/carol/.claude.json"
+    acct_expect "cache newer than source → cached name" carol \
+        CLAUDE_CONFIG_DIR="$ACCT/carol" CLAUDE_USAGE_DIR="$ACCT/u7"
+    touch -t 200001010000 "$ACCT/u7/.account"
+    touch "$ACCT/carol/.claude.json"
+    acct_expect "source newer than cache → re-read" eve \
+        CLAUDE_CONFIG_DIR="$ACCT/carol" CLAUDE_USAGE_DIR="$ACCT/u7"
+
+    [ "$MODE" = account ] && finish
+fi
+
 # ---- Spend figure: read from Anthropic's meter, never derived locally ----
 # These are assertions, not eyeball states: each one names an expected value
 # and reports PASS/FAIL, because the claim being tested is a number's
 # provenance rather than its appearance.
 printf '\n\033[1m══ Spend figure (authoritative meter)\033[0m\n'
-FAILED=0
 
 plant() { rm -rf "$CLAUDE_USAGE_DIR"; mkdir -p "$CLAUDE_USAGE_DIR"
           [ -n "$1" ] && printf '%s' "$1" > "$CLAUDE_USAGE_DIR/.oauth_usage.json"; }
@@ -219,7 +327,8 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-leftover=$(find "$CLAUDE_USAGE_DIR" -type f ! -name '.oauth_usage*' 2>/dev/null)
+# .account is the account-label cache: per config dir, not per session.
+leftover=$(find "$CLAUDE_USAGE_DIR" -type f ! -name '.oauth_usage*' ! -name '.account' 2>/dev/null)
 if [ -z "$leftover" ]; then
     printf '  \033[32mPASS\033[0m  %-44s %s\n' "no per-session state written" "clean"
 else
@@ -227,5 +336,4 @@ else
     FAILED=$((FAILED + 1))
 fi
 
-printf '\n'
-[ "$FAILED" -eq 0 ] || { printf '\033[31m%s assertion(s) failed\033[0m\n\n' "$FAILED"; exit 1; }
+finish
