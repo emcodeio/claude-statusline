@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code status line — three rows:
-#   1  model · effort │ ⎇ git │ agent │ ctx gauge
+#   1  model · effort │ ⎇ git │ agent │ ctx gauge │ account
 #   2  5h gauge + pace projection │ 7d gauge + daily-allowance projection
 #      │ per-model weekly gauge(s), via a background-refreshed OAuth cache
 #   3  cost (+ extra-usage spend) │ cache │ last seen │ cwd │ session name
@@ -30,6 +30,8 @@
 #
 # Testing hook: CLAUDE_SL_NOW overrides "now" so the preview harness can
 # render deterministic pace projections.
+#
+# CLAUDE_SL_NO_ACCOUNT=1 hides the account label (screen shares, recordings).
 
 set -f
 
@@ -496,6 +498,41 @@ budget=''
 # shellcheck disable=SC1090
 [ -f "$config" ] && . "$config" 2>/dev/null
 
+# ===== Account =====
+# The payload doesn't say who is logged in; Claude Code's own config does, as
+# oauthAccount.emailAddress in .claude.json (inside CLAUDE_CONFIG_DIR when set,
+# else $HOME). That file is ~200 KB and rewritten often, so the label is cached
+# as two lines — source path, then label — and rebuilt only when the source is
+# not strictly older than the cache. The usual render is a `read` and a `-nt`
+# test, both builtins: no spawn. The source path guards a CLAUDE_USAGE_DIR
+# shared across config dirs, where one account's cache would otherwise label
+# another's session. Absent oauthAccount (API key, Bedrock, Vertex) hides it.
+acct=''
+if [ -z "${CLAUDE_SL_NO_ACCOUNT:-}" ]; then
+    acct_src="${CLAUDE_CONFIG_DIR:+$CLAUDE_CONFIG_DIR/.claude.json}"
+    acct_src="${acct_src:-$HOME/.claude.json}"
+    # Synthetic-clock renders (previews, the README screenshot) read only a
+    # config dir handed to them, never the real home file — a regenerated
+    # screenshot must not publish whoever ran it.
+    [ -n "${CLAUDE_SL_NOW:-}" ] && [ -z "${CLAUDE_CONFIG_DIR:-}" ] && acct_src=''
+    acct_cache="$usage_dir/.account"
+    if [ -n "$acct_src" ] && [ -f "$acct_src" ]; then
+        _asrc=''
+        [ -f "$acct_cache" ] && { IFS= read -r _asrc; IFS= read -r acct; } < "$acct_cache"
+        if [ "$_asrc" != "$acct_src" ] || ! [ "$acct_cache" -nt "$acct_src" ]; then
+            # Control characters stripped: the label goes straight to a terminal.
+            acct=$(jq -r '.oauthAccount.emailAddress // empty | gsub("[[:cntrl:]]"; "")' \
+                "$acct_src" 2>/dev/null)
+            acct=${acct%%@*}
+            [ -d "$usage_dir" ] || mkdir -p "$usage_dir"
+            printf '%s\n%s\n' "$acct_src" "$acct" > "$acct_cache" 2>/dev/null
+        fi
+    fi
+    if [ ${#acct} -gt 20 ]; then
+        acct="$(printf '%.19s' "$acct")…"
+    fi
+fi
+
 # ===== Line 1: identity =====
 l1=''
 if [ -n "$model" ]; then
@@ -577,6 +614,7 @@ fi
 
 [ -n "$agent" ] && add "${dim}agent:${rst}${c_haiku}${agent}${rst}"
 [ -n "$ctx" ] && add "${dim}ctx${rst} $(mkbar "$ctx" ctx)"
+[ -n "$acct" ] && add "${dim}${acct}${rst}"
 
 # ===== Line 2: rate-limit windows =====
 l2=''

@@ -5,7 +5,7 @@ A three-row [Claude Code](https://code.claude.com) status line: context and rate
 ![statusline](screenshot.svg)
 
 ```
-Opus 5 (1M) · xhigh │ ⎇ main ~1 ?12 │ ctx ▉░░░░░░░░░ 9%
+Opus 5 (1M) · xhigh │ ⎇ main ~1 ?12 │ ctx ▉░░░░░░░░░ 9% │ you
 5h ███████▌░░ 75% ↑57m ↻2h10m │ 7d █████▌░░░░ 55% → ↻Sat │ Fable █████▎░░░░ 52% ↑Sun 4PM ↻Mon
 $12.14 │ cache 99% │ 6:24PM │ ~/…/myproject │ Refactor the auth module
 ```
@@ -14,7 +14,7 @@ POSIX shell, no dependencies beyond `jq` and the usual coreutils (`curl` if you 
 
 ## What you're looking at
 
-**Row 1 — identity and workspace.** Model (amber Opus, blue Sonnet, cyan Haiku, crimson Fable) · reasoning effort (dim → cyan → orange → red) │ git branch with `✓` clean or `+N` staged / `~N` modified / `?N` untracked, plus `⇡N` / `⇣N` divergence │ context-window gauge.
+**Row 1 — identity and workspace.** Model (amber Opus, blue Sonnet, cyan Haiku, crimson Fable) · reasoning effort (dim → cyan → orange → red) │ git branch with `✓` clean or `+N` staged / `~N` modified / `?N` untracked, plus `⇡N` / `⇣N` divergence │ context-window gauge │ the [logged-in account](#the-account-label), as the part of its email before the `@`.
 
 **Row 2 — rate limits.** The 5-hour and 7-day windows, each as `gauge · percent · pace verdict · reset` — plus a gauge per [model-scoped weekly limit](#the-model-scoped-weekly-gauge) when your plan has one, labeled with the model's name in its color.
 
@@ -105,6 +105,16 @@ Set `CLAUDE_SL_NO_OAUTH=1` to turn the whole thing off — no fetch, no gauge, a
 
 Worth being honest about: the endpoint is unofficial and undocumented, so its shape can change without notice. When it does, the gauge disappears (the parser finds nothing) rather than rendering garbage — and the rest of the status line doesn't care.
 
+## The account label
+
+If you switch between Claude Code accounts, row 1 ends with a dim label confirming which one is active: `you@example.com` shows as `you`. Names longer than 20 characters are cut to 19 plus `…`.
+
+The payload doesn't say who is logged in, but Claude Code's own config does: `oauthAccount.emailAddress` in `~/.claude.json`, or in `$CLAUDE_CONFIG_DIR/.claude.json` when that's set — so each config dir shows its own account. API-key, Bedrock and Vertex logins have no `oauthAccount`, and the label stays hidden.
+
+That file runs to a few hundred KB and Claude Code rewrites it often, so the label is cached in the usage dir (`.account`) and re-read only when the config file is newer than the cache. Most renders cost no extra process. The cache records which config file it came from, so a usage dir shared across config dirs can't show one account's name in another's session.
+
+The label appears in every screenshot, recording and screen share of your terminal. Set `CLAUDE_SL_NO_ACCOUNT=1` to hide it.
+
 ## Install
 
 Requires Claude Code and `jq`.
@@ -134,23 +144,27 @@ Symlinking (rather than copying) means every edit you make is already in the wor
 ### Preview every state without waiting for it
 
 ```sh
-bash statusline-preview.sh          # 14 render states
-bash statusline-preview.sh spend    # spend-figure + regression assertions
+bash statusline-preview.sh            # 14 render states + all assertions
+bash statusline-preview.sh spend      # spend-figure + regression assertions
+bash statusline-preview.sh account    # account-label assertions
 ```
 
-The harness is hermetic: it builds its own clean and dirty git repos, redirects the usage dir to a scratch dir, and pins the clock so pace projections are deterministic. It never touches `~/.claude/usage`. The `spend` mode exits non-zero on any failed assertion, so it works as a pre-commit check.
+The harness is hermetic: it builds its own clean and dirty git repos, redirects the usage dir and the config dir to a scratch dir, and pins the clock so pace projections are deterministic. It never touches `~/.claude/usage` or reads your `.claude.json` — every state shows a placeholder account, `you`. Any failed assertion exits non-zero, so it works as a pre-commit check.
 
 ### Regenerating the screenshot
 
-`screenshot.svg` is rendered from real ANSI output rather than captured, so it stays crisp and diffs as text. The committed demo payload carries a placeholder path; substitute a real repo at render time so the git segment appears:
+`screenshot.svg` is rendered from real ANSI output rather than captured, so it stays crisp and diffs as text. The committed demo payload carries a placeholder path; substitute a real repo at render time so the git segment appears. The account label comes from a throwaway config dir holding a placeholder account:
 
 ```sh
+fake=$(mktemp -d)
+printf '{"oauthAccount":{"emailAddress":"you@example.com"}}' > "$fake/.claude.json"
 jq --arg cwd "$PWD" '.workspace.current_dir = $cwd' tools/demo-payload.json \
-  | CLAUDE_SL_NOW=1785355000 CLAUDE_USAGE_DIR=$(mktemp -d) sh statusline-command.sh \
+  | CLAUDE_CONFIG_DIR="$fake" CLAUDE_SL_NOW=1785355000 CLAUDE_USAGE_DIR=$(mktemp -d) \
+    sh statusline-command.sh \
   | python3 tools/ansi-to-svg.py > screenshot.svg
 ```
 
-The pinned `CLAUDE_SL_NOW` keeps the rendered durations stable across regenerations.
+The pinned `CLAUDE_SL_NOW` keeps the rendered durations stable across regenerations. It also keeps your name out of the image: with `CLAUDE_SL_NOW` set and no `CLAUDE_CONFIG_DIR`, the script never reads `~/.claude.json`, so leaving out the fake config dir drops the label rather than publishing the account of whoever ran the command.
 
 ## Gotchas worth knowing
 
